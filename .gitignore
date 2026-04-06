@@ -25,6 +25,7 @@ yarn-error.log*
 
 # local env files
 .env*.local
+UnireLite_keys.env.local
 
 # vercel
 .vercel
