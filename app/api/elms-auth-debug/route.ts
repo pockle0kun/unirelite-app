@@ -126,14 +126,17 @@ export async function POST(request: NextRequest) {
 
     r = await doFetch(currentUrl, { method: "GET" }, jar);
     jar = r.jar;
+
+    const isOtpPage = currentUrl.match(/otp/i) || r.body.includes("ワンタイム") || r.body.includes("one-time") || r.body.includes("otp");
     trace.push({
       step: 4,
       desc: "Follow post-login redirect",
       url: currentUrl.slice(0, 120),
       status: r.status,
       location: r.location?.slice(0, 120),
+      isOtpPage: !!isOtpPage,
       hasSAMLResponse: r.body.includes("SAMLResponse"),
-      bodySnippet: r.body.slice(0, 800),
+      bodyFull: isOtpPage ? r.body : r.body.slice(0, 800),
       cookieKeys: Object.keys(jar),
     });
   }
@@ -144,12 +147,14 @@ export async function POST(request: NextRequest) {
     r = await doFetch(currentUrl, { method: "GET" }, jar);
     jar = r.jar;
     redirectCount++;
+    const isOtpPage = currentUrl.match(/otp/i) || r.body.includes("ワンタイム");
     trace.push({
       step: `5.${redirectCount}`,
       url: currentUrl.slice(0, 120),
       status: r.status,
+      isOtpPage: !!isOtpPage,
       hasSAMLResponse: r.body.includes("SAMLResponse"),
-      bodySnippet: r.body.slice(0, 400),
+      bodyFull: isOtpPage ? r.body : r.body.slice(0, 400),
     });
   }
 
