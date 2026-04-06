@@ -4,7 +4,8 @@ import { authOptions } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { elmsLogin, elmsSubmitOtp, type OtpSessionData } from "@/lib/elmsAuth";
 
-// Vercel Hobby: max 10s, Pro: max 60s
+// 日本リージョン（東京）で実行 → 北大SSOが国内IPと判断してOTPをスキップ
+export const preferredRegion = "hnd1";
 export const maxDuration = 30;
 
 async function getUserEmail(): Promise<string | null> {
