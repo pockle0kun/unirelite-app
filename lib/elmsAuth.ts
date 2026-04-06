@@ -127,8 +127,9 @@ export interface OtpSessionData {
 }
 
 /**
- * Step 1: submit username + password.
- * Returns either success, otp_required, or error.
+ * Hokudai SSO is a two-step form:
+ *   Step 1: POST username to prelogin.cgi → redirects to login.cgi (password page)
+ *   Step 2: POST username+password to login.cgi → redirects to SAMLResponse
  */
 export async function elmsLogin(
   username: string,
@@ -137,95 +138,102 @@ export async function elmsLogin(
   try {
     let jar: CookieJar = {};
 
-    // 1) GET unire/api/samlauth/login → follow redirects → IdP login page
-    const loginPage = await followRedirects(
-      `${UNIRE_BASE}/api/samlauth/login`,
-      jar
-    );
-    jar = loginPage.jar;
-    const html = loginPage.body;
+    // ── Step 1: GET Unire → follow redirects → username form (prelogin.cgi) ──
+    const step1Page = await followRedirects(`${UNIRE_BASE}/api/samlauth/login`, jar);
+    jar = step1Page.jar;
 
-    if (!html.includes("prelogin.cgi")) {
+    if (!step1Page.body.includes("prelogin.cgi")) {
       return { status: "error", message: "ログインページが見つかりませんでした" };
     }
 
-    // 2) Extract hidden fields
-    const sessid = extractInput(html, "sessid");
-    const back = extractInput(html, "back");
-    const preloginUrl = new URL("prelogin.cgi", loginPage.url).toString();
+    const sessid1 = extractInput(step1Page.body, "sessid");
+    const back1   = extractInput(step1Page.body, "back");
+    const preloginUrl = new URL("prelogin.cgi", step1Page.url).toString();
 
-    if (!sessid || !back) {
-      return { status: "error", message: "フォームのパラメータが取得できませんでした" };
+    if (!sessid1 || !back1) {
+      return { status: "error", message: "Step1フォームのパラメータが取得できませんでした" };
     }
 
-    // 3) POST credentials
-    const body = new URLSearchParams({
-      dummy: "",
-      username,
-      password,
-      op: "login",
-      back,
-      sessid,
-    });
-
-    const postRes = await fetchNoRedirect(
+    // ── Step 1 POST: username only → get password page ──
+    const step1Post = await fetchNoRedirect(
       preloginUrl,
-      { method: "POST", body: body.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: loginPage.url } },
+      {
+        method: "POST",
+        body: new URLSearchParams({ dummy: "", username, password: "password", op: "login", back: back1, sessid: sessid1 }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: step1Page.url },
+      },
       jar
     );
-    jar = postRes.jar;
+    jar = step1Post.jar;
 
-    // 4a) OTP required → back to login page with OTP prompt
-    if (postRes.status === 200 && postRes.body.includes("otp")) {
-      const newSessid = extractInput(postRes.body, "sessid") || sessid;
-      const newBack = extractInput(postRes.body, "back") || back;
+    if (!(step1Post.status >= 300 && step1Post.status < 400) || !step1Post.headers.get("location")) {
+      return { status: "error", message: `Step1 POST: 予期しないレスポンス (${step1Post.status})` };
+    }
+
+    // ── Step 2: GET login.cgi (password form) ──
+    const loginCgiUrl = new URL(step1Post.headers.get("location")!, preloginUrl).toString();
+    const step2Page = await followRedirects(loginCgiUrl, jar);
+    jar = step2Page.jar;
+
+    const sessid2    = extractInput(step2Page.body, "sessid");
+    const back2      = extractInput(step2Page.body, "back");
+    const loginCgiAction = (() => {
+      const m = step2Page.body.match(/<form[^>]+action=["']([^"']+)["']/i);
+      return m ? new URL(m[1], step2Page.url).toString() : new URL("login.cgi", step2Page.url).toString();
+    })();
+
+    if (!sessid2 || !back2) {
+      return { status: "error", message: "Step2フォームのパラメータが取得できませんでした" };
+    }
+
+    // OTP page?
+    if (step2Page.url.includes("otplogin") || step2Page.url.includes("motplogin") || step2Page.body.includes("ワンタイムパスワード")) {
       return {
         status: "otp_required",
-        sessionData: { preloginUrl, sessid: newSessid, back: newBack, jar },
+        sessionData: { preloginUrl: loginCgiAction, sessid: sessid2, back: back2, jar },
       };
     }
 
-    // 4b) Handle redirect
-    if (postRes.status >= 300 && postRes.status < 400) {
-      const loc = postRes.headers.get("location") ?? "";
-      const nextUrl = new URL(loc, preloginUrl).toString();
+    // ── Step 2 POST: username + password to login.cgi ──
+    const step2Post = await fetchNoRedirect(
+      loginCgiAction,
+      {
+        method: "POST",
+        body: new URLSearchParams({ dummy: "", username, password, op: "login", back: back2, sessid: sessid2 }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: step2Page.url },
+      },
+      jar
+    );
+    jar = step2Post.jar;
 
-      // ログイン失敗 → login.cgi に戻される
-      if (loc.includes("login.cgi")) {
-        return { status: "error", message: "IDまたはパスワードが正しくありません" };
-      }
-
-      // OTP要求 → otp.cgi 等への遷移
-      if (loc.includes("otp")) {
-        const otpPage = await followRedirects(nextUrl, jar);
-        jar = otpPage.jar;
-        const newSessid = extractInput(otpPage.body, "sessid") || sessid;
-        const newBack = extractInput(otpPage.body, "back") || back;
-        return {
-          status: "otp_required",
-          sessionData: { preloginUrl, sessid: newSessid, back: newBack, jar },
-        };
-      }
-
-      // 成功 → SSOService へリダイレクト → SAMLResponse取得
-      return await completeSamlFlow(nextUrl, jar);
-    }
-
-    // 4c) 200が返ってきた場合（OTP画面など）
-    if (postRes.status === 200 && postRes.body.includes("otp")) {
-      const newSessid = extractInput(postRes.body, "sessid") || sessid;
-      const newBack = extractInput(postRes.body, "back") || back;
-      return {
-        status: "otp_required",
-        sessionData: { preloginUrl, sessid: newSessid, back: newBack, jar },
-      };
-    }
-
-    if (postRes.status === 200) {
+    // Wrong password → redirected back to login.cgi
+    if (step2Post.status >= 300 && step2Post.headers.get("location")?.includes("login.cgi")) {
       return { status: "error", message: "IDまたはパスワードが正しくありません" };
     }
 
-    return { status: "error", message: `予期しないレスポンス (${postRes.status})` };
+    // OTP required at step 2
+    if (step2Post.status >= 300 && step2Post.headers.get("location")?.match(/otp/i)) {
+      const otpUrl = new URL(step2Post.headers.get("location")!, loginCgiAction).toString();
+      const otpPage = await followRedirects(otpUrl, jar);
+      jar = otpPage.jar;
+      return {
+        status: "otp_required",
+        sessionData: {
+          preloginUrl: loginCgiAction,
+          sessid: extractInput(otpPage.body, "sessid") || sessid2,
+          back: extractInput(otpPage.body, "back") || back2,
+          jar,
+        },
+      };
+    }
+
+    // Success → follow redirects to SAMLResponse
+    if (step2Post.status >= 300 && step2Post.headers.get("location")) {
+      const nextUrl = new URL(step2Post.headers.get("location")!, loginCgiAction).toString();
+      return await completeSamlFlow(nextUrl, jar);
+    }
+
+    return { status: "error", message: `Step2 POST: 予期しないレスポンス (${step2Post.status})` };
   } catch (e) {
     return { status: "error", message: e instanceof Error ? e.message : "不明なエラー" };
   }
