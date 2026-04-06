@@ -87,11 +87,23 @@ async function followRedirects(
   throw new Error("Too many redirects");
 }
 
+/** decode HTML entities in attribute values */
+function decodeHtml(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x2F;/g, "/");
+}
+
 /** extract a named input value from HTML */
 function extractInput(html: string, name: string): string {
   const re = new RegExp(`name=["']${name}["'][^>]*value=["']([^"']*?)["']`, "i");
   const re2 = new RegExp(`value=["']([^"']*?)["'][^>]*name=["']${name}["']`, "i");
-  return (html.match(re) ?? html.match(re2))?.[1] ?? "";
+  const raw = (html.match(re) ?? html.match(re2))?.[1] ?? "";
+  return decodeHtml(raw);
 }
 
 /** extract form action from HTML */
@@ -173,22 +185,44 @@ export async function elmsLogin(
       };
     }
 
-    // 4b) Wrong password
-    if (
-      postRes.status === 200 &&
-      (postRes.body.includes("Invalid") ||
-        postRes.body.includes("incorrect") ||
-        postRes.body.includes("認証に失敗") ||
-        postRes.body.includes("パスワードが違"))
-    ) {
-      return { status: "error", message: "IDまたはパスワードが正しくありません" };
+    // 4b) Handle redirect
+    if (postRes.status >= 300 && postRes.status < 400) {
+      const loc = postRes.headers.get("location") ?? "";
+      const nextUrl = new URL(loc, preloginUrl).toString();
+
+      // ログイン失敗 → login.cgi に戻される
+      if (loc.includes("login.cgi")) {
+        return { status: "error", message: "IDまたはパスワードが正しくありません" };
+      }
+
+      // OTP要求 → otp.cgi 等への遷移
+      if (loc.includes("otp")) {
+        const otpPage = await followRedirects(nextUrl, jar);
+        jar = otpPage.jar;
+        const newSessid = extractInput(otpPage.body, "sessid") || sessid;
+        const newBack = extractInput(otpPage.body, "back") || back;
+        return {
+          status: "otp_required",
+          sessionData: { preloginUrl, sessid: newSessid, back: newBack, jar },
+        };
+      }
+
+      // 成功 → SSOService へリダイレクト → SAMLResponse取得
+      return await completeSamlFlow(nextUrl, jar);
     }
 
-    // 4c) Redirect → continue SAML flow
-    if (postRes.status >= 300 && postRes.status < 400) {
-      const loc = postRes.headers.get("location")!;
-      const nextUrl = new URL(loc, preloginUrl).toString();
-      return await completeSamlFlow(nextUrl, jar);
+    // 4c) 200が返ってきた場合（OTP画面など）
+    if (postRes.status === 200 && postRes.body.includes("otp")) {
+      const newSessid = extractInput(postRes.body, "sessid") || sessid;
+      const newBack = extractInput(postRes.body, "back") || back;
+      return {
+        status: "otp_required",
+        sessionData: { preloginUrl, sessid: newSessid, back: newBack, jar },
+      };
+    }
+
+    if (postRes.status === 200) {
+      return { status: "error", message: "IDまたはパスワードが正しくありません" };
     }
 
     return { status: "error", message: `予期しないレスポンス (${postRes.status})` };
@@ -244,44 +278,67 @@ async function completeSamlFlow(
   const samlPage = await followRedirects(startUrl, jar);
   jar = samlPage.jar;
 
+  // Check if already at Unire (cookies may already be set)
+  let saml2Cookie = jar[".AspNetCore.saml2"];
+  let wapid = jar["WAPID"];
+  if (saml2Cookie && wapid) return { status: "ok", saml2Cookie, wapid };
+
   // The IdP returns an HTML page with a form containing SAMLResponse
   const samlResponse = extractInput(samlPage.body, "SAMLResponse");
   const relayState = extractInput(samlPage.body, "RelayState");
   const acsUrl = extractAction(samlPage.body, samlPage.url);
 
-  if (!samlResponse || !acsUrl) {
-    // Maybe already redirected to Unire — check cookies
-    const saml2 = jar[".AspNetCore.saml2"];
-    const wapid = jar["WAPID"];
-    if (saml2 && wapid) return { status: "ok", saml2Cookie: saml2, wapid };
-    return { status: "error", message: "SAML認証レスポンスが取得できませんでした" };
+  if (!samlResponse) {
+    return {
+      status: "error",
+      message: "SAML認証レスポンスが取得できませんでした。IDとパスワードを確認してください。",
+    };
+  }
+
+  if (!acsUrl) {
+    return { status: "error", message: "ACSエンドポイントが見つかりませんでした" };
   }
 
   // POST SAMLResponse to Unire's ACS endpoint
   const acsBody = new URLSearchParams({ SAMLResponse: samlResponse, RelayState: relayState });
   const acsPost = await fetchNoRedirect(
     acsUrl,
-    { method: "POST", body: acsBody.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: samlPage.url } },
+    {
+      method: "POST",
+      body: acsBody.toString(),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Referer: samlPage.url,
+      },
+    },
     jar
   );
   jar = acsPost.jar;
 
-  // Follow the final redirect(s) to Unire home
+  // Follow the final redirect(s) to Unire home, collecting cookies
   if (acsPost.status >= 300 && acsPost.status < 400) {
     const loc = acsPost.headers.get("location")!;
     const unireHome = await followRedirects(new URL(loc, acsUrl).toString(), jar);
     jar = unireHome.jar;
   }
 
-  const saml2Cookie = jar[".AspNetCore.saml2"];
-  const wapid = jar["WAPID"];
+  saml2Cookie = jar[".AspNetCore.saml2"];
+  wapid = jar["WAPID"];
 
   if (saml2Cookie && wapid) {
     return { status: "ok", saml2Cookie, wapid };
   }
 
+  // WAPID may be set on the first actual page load — try fetching Unire home
+  if (saml2Cookie && !wapid) {
+    const homeRes = await fetchNoRedirect(`${UNIRE_BASE}/`, { method: "GET" }, jar);
+    jar = homeRes.jar;
+    wapid = jar["WAPID"];
+    if (saml2Cookie && wapid) return { status: "ok", saml2Cookie, wapid };
+  }
+
   return {
     status: "error",
-    message: "セッションCookieが取得できませんでした。ログインは成功した可能性がありますが、Cookieの取得に失敗しました。",
+    message: `セッションCookieが取得できませんでした (.AspNetCore.saml2: ${saml2Cookie ? "取得済" : "なし"}, WAPID: ${wapid ? "取得済" : "なし"})`,
   };
 }
