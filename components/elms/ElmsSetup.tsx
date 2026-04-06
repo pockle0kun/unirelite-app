@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   CheckCircle, AlertCircle, Wifi, WifiOff, Trash2,
-  Eye, EyeOff, Loader2, Lock, ShieldCheck,
+  Eye, EyeOff, Loader2, Lock, ShieldCheck, Monitor, Copy, Check,
 } from "lucide-react";
 import type { OtpSessionData } from "@/lib/elmsAuth";
 
@@ -11,7 +11,7 @@ interface Props {
   onConnected?: () => void;
 }
 
-type Step = "status" | "login" | "otp";
+type Step = "status" | "login" | "otp" | "pc_connect";
 
 export function ElmsSetup({ onConnected }: Props) {
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -28,12 +28,39 @@ export function ElmsSetup({ onConnected }: Props) {
   const [otp, setOtp] = useState("");
   const [otpSession, setOtpSession] = useState<OtpSessionData | null>(null);
 
+  // PC connect
+  const [pcToken, setPcToken] = useState<string | null>(null);
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     fetch("/api/elms-credentials")
       .then((r) => r.json())
       .then((d) => setConnected(d.connected ?? false))
       .catch(() => setConnected(false));
   }, []);
+
+  // Poll for connection when on pc_connect step
+  useEffect(() => {
+    if (step !== "pc_connect") {
+      if (pollRef.current) clearInterval(pollRef.current);
+      return;
+    }
+    pollRef.current = setInterval(() => {
+      fetch("/api/elms-credentials")
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.connected) {
+            setConnected(true);
+            setStep("status");
+            onConnected?.();
+          }
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [step, onConnected]);
 
   const handleLogin = async () => {
     if (!username.trim() || !password) {
@@ -103,6 +130,35 @@ export function ElmsSetup({ onConnected }: Props) {
     setConnected(false);
   };
 
+  const handleStartPcConnect = async () => {
+    setTokenLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/elms-relay");
+      const data = await res.json();
+      if (data.token) {
+        setPcToken(data.token);
+        setStep("pc_connect");
+      } else {
+        setError("トークンの取得に失敗しました");
+      }
+    } catch {
+      setError("通信エラーが発生しました");
+    } finally {
+      setTokenLoading(false);
+    }
+  };
+
+  const handleCopy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   if (connected === null) {
     return <div className="py-8 text-center text-sm text-gray-400">確認中…</div>;
   }
@@ -127,13 +183,35 @@ export function ElmsSetup({ onConnected }: Props) {
           </div>
         </div>
 
-        <button
-          onClick={() => { setStep("login"); setError(null); }}
-          className="w-full py-3 rounded-xl bg-hokudai-green text-white text-sm font-semibold flex items-center justify-center gap-2 active:opacity-80"
-        >
-          <Wifi className="w-4 h-4" />
-          {connected ? "Cookieを再取得する" : "ELMSに接続する"}
-        </button>
+        {/* 接続ボタン群 */}
+        <div className="space-y-2">
+          <button
+            onClick={() => { setStep("login"); setError(null); }}
+            className="w-full py-3 rounded-xl bg-hokudai-green text-white text-sm font-semibold flex items-center justify-center gap-2 active:opacity-80"
+          >
+            <Wifi className="w-4 h-4" />
+            {connected ? "Cookieを再取得する（自動）" : "ELMSに接続する（自動）"}
+          </button>
+
+          <button
+            onClick={handleStartPcConnect}
+            disabled={tokenLoading}
+            className="w-full py-3 rounded-xl bg-gray-100 text-gray-700 text-sm font-medium flex items-center justify-center gap-2 active:opacity-80 disabled:opacity-50"
+          >
+            {tokenLoading
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <Monitor className="w-4 h-4" />
+            }
+            PCのブラウザで接続する
+          </button>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-2 text-red-500 text-xs">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {error}
+          </div>
+        )}
 
         {connected && (
           <button
@@ -144,6 +222,51 @@ export function ElmsSetup({ onConnected }: Props) {
             接続を解除する
           </button>
         )}
+      </div>
+    );
+  }
+
+  // ── PC接続画面 ────────────────────────────────
+  if (step === "pc_connect" && pcToken) {
+    const command = `python scraper/main.py --connect ${pcToken}`;
+    return (
+      <div className="p-4 space-y-4 pb-8">
+        <div className="bg-blue-50 rounded-xl p-3 space-y-1">
+          <p className="text-xs font-semibold text-blue-700">PCで以下のコマンドを実行してください</p>
+          <p className="text-xs text-blue-600">
+            ブラウザが開くのでログイン → 自動でCookieが送信されます（有効期限: 15分）
+          </p>
+        </div>
+
+        <div className="bg-gray-900 rounded-xl p-3">
+          <p className="text-[11px] text-gray-400 mb-1.5 font-mono">ターミナルで実行：</p>
+          <div className="flex items-start gap-2">
+            <code className="text-xs text-green-400 font-mono flex-1 break-all leading-relaxed">
+              {command}
+            </code>
+            <button
+              onClick={() => handleCopy(command)}
+              className="shrink-0 text-gray-400 active:text-white transition-colors"
+            >
+              {copied
+                ? <Check className="w-4 h-4 text-green-400" />
+                : <Copy className="w-4 h-4" />
+              }
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+          接続完了を待機中…（自動で画面が切り替わります）
+        </div>
+
+        <button
+          onClick={() => { setStep("status"); setError(null); }}
+          className="w-full py-2.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium active:opacity-80"
+        >
+          キャンセル
+        </button>
       </div>
     );
   }

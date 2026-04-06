@@ -4,13 +4,12 @@ import { authOptions } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { createHmac } from "crypto";
 
-const CORS_ORIGIN = "https://unire.hokudai.ac.jp";
 const TOKEN_TTL_MS = 15 * 60 * 1000; // 15分
 
+// POST from scraper has no Origin header — allow all (token is the auth)
 function corsHeaders(origin: string | null) {
-  const allowed = origin === CORS_ORIGIN || !origin;
   return {
-    "Access-Control-Allow-Origin": allowed ? (origin ?? "*") : "null",
+    "Access-Control-Allow-Origin": origin ?? "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };

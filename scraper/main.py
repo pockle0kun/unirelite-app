@@ -395,9 +395,51 @@ async def run(force_login: bool = False, skip_guides: bool = False) -> None:
         print(f"✅ ガイド:   {len(guides)} 件 → {OUTPUT_GUIDES}")
 
 
+APP_URL = "https://unirelite.vercel.app"
+
+
+async def connect_to_app(token: str, app_url: str) -> None:
+    """
+    ブラウザでUnireにログインし、CookieをアプリのAPIに送信する。
+    使い方: python main.py --connect TOKEN [--app-url URL]
+    """
+    print("[Connect] ブラウザを起動します。通常どおりログインしてください...")
+    cookies = await login_with_browser()
+
+    cookie_dict = {c["name"]: c["value"] for c in cookies}
+    saml2_cookie = cookie_dict.get(".AspNetCore.saml2", "")
+    wapid = cookie_dict.get("WAPID", "")
+
+    if not saml2_cookie or not wapid:
+        print("[Connect] エラー: 必要なCookieが見つかりませんでした。")
+        print(f"  取得されたCookie: {list(cookie_dict.keys())}")
+        return
+
+    relay_url = f"{app_url.rstrip('/')}/api/elms-relay"
+    print(f"[Connect] Cookie取得完了。アプリに送信中... → {relay_url}")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.post(
+            relay_url,
+            json={"token": token, "elms_cookie": saml2_cookie, "elms_wapid": wapid},
+            headers={"Content-Type": "application/json"},
+        )
+
+    if res.status_code == 200:
+        print("[Connect] ✅ 接続成功！アプリでELMSのお知らせが表示されるようになりました。")
+    else:
+        print(f"[Connect] エラー: {res.status_code} {res.text}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unire スクレイパー")
     parser.add_argument("--login", action="store_true", help="強制的に再ログインする")
     parser.add_argument("--no-guides", action="store_true", help="ガイド取得をスキップ（お知らせのみ）")
+    parser.add_argument("--connect", metavar="TOKEN", help="アプリにCookieを送信するトークン")
+    parser.add_argument("--app-url", default=APP_URL, help=f"アプリのURL（デフォルト: {APP_URL}）")
     args = parser.parse_args()
-    asyncio.run(run(force_login=args.login, skip_guides=args.no_guides))
+
+    if args.connect:
+        asyncio.run(connect_to_app(args.connect, args.app_url))
+    else:
+        asyncio.run(run(force_login=args.login, skip_guides=args.no_guides))
