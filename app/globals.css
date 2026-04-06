@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+}
+
+/* Summernote HTMLのレンダリング */
+.unire-body p {
+  margin-bottom: 0.75em;
+  line-height: 1.7;
+}
+.unire-body p:last-child {
+  margin-bottom: 0;
+}
+.unire-body strong, .unire-body b {
+  font-weight: 600;
+}
+.unire-body em, .unire-body i {
+  font-style: italic;
+}
+.unire-body u {
+  text-decoration: underline;
+}
+.unire-body ul {
+  list-style-type: disc;
+  padding-left: 1.25em;
+  margin-bottom: 0.75em;
+}
+.unire-body ol {
+  list-style-type: decimal;
+  padding-left: 1.25em;
+  margin-bottom: 0.75em;
+}
+.unire-body li {
+  margin-bottom: 0.25em;
+}
+.unire-body br {
+  display: block;
+  content: "";
+}
+.unire-body a {
+  color: #0070f3;
+  text-decoration: underline;
+  word-break: break-all;
+}
+.unire-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 0.5em 0;
+}
+.unire-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+  margin-bottom: 0.75em;
+}
+.unire-body th, .unire-body td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+  text-align: left;
+}
+.unire-body th {
+  background: #f9fafb;
+  font-weight: 600;
+}
+.unire-body h1, .unire-body h2, .unire-body h3 {
+  font-weight: 600;
+  margin-bottom: 0.5em;
+}
+.unire-body h1 { font-size: 1.2em; }
+.unire-body h2 { font-size: 1.1em; }
+.unire-body h3 { font-size: 1em; }
+
+@layer utilities {
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
