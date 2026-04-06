@@ -1,56 +1,32 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   CheckCircle, AlertCircle, Wifi, WifiOff, Trash2,
-  Bookmark, ExternalLink, Loader2, ChevronRight,
+  Eye, EyeOff, Loader2, Lock, ShieldCheck,
 } from "lucide-react";
+import type { OtpSessionData } from "@/lib/elmsAuth";
 
 interface Props {
   onConnected?: () => void;
 }
 
-type Mode = "status" | "auto" | "manual";
-
-// ブックマークレットコード生成（トークン埋め込み）
-function makeBookmarklet(token: string, appUrl: string): string {
-  const code = `(function(){
-var c={};
-document.cookie.split(';').forEach(function(x){
-  var p=x.trim().indexOf('=');
-  if(p>0)c[x.trim().slice(0,p)]=x.trim().slice(p+1);
-});
-var saml=c['.AspNetCore.saml2'];
-var wapid=c['WAPID'];
-if(!saml||!wapid){
-  alert('Cookieを取得できませんでした。\\nUnireにログインしてから実行してください。\\n\\n取得できない場合はUnireLiteで「手動入力」をお試しください。');
-  return;
-}
-fetch('${appUrl}/api/elms-relay',{
-  method:'POST',
-  headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({token:'${token}',elms_cookie:saml,elms_wapid:wapid})
-}).then(function(r){return r.json();})
-.then(function(d){
-  if(d.ok)alert('✅ UnireLiteにELMSを接続しました！\\nこのタブを閉じてUnireLiteに戻ってください。');
-  else alert('❌ 接続に失敗しました\\n'+( d.error||'不明なエラー'));
-}).catch(function(e){alert('❌ 通信エラー: '+e.message);});
-})()`;
-  return "javascript:" + encodeURIComponent(code);
-}
+type Step = "status" | "login" | "otp";
 
 export function ElmsSetup({ onConnected }: Props) {
   const [connected, setConnected] = useState<boolean | null>(null);
-  const [mode, setMode] = useState<Mode>("status");
-  const [token, setToken] = useState<string | null>(null);
-  const [polling, setPolling] = useState(false);
-  const [tokenExpiry, setTokenExpiry] = useState<number>(0);
+  const [step, setStep] = useState<Step>("status");
 
-  // 手動入力
-  const [samlCookie, setSamlCookie] = useState("");
-  const [wapid, setWapid] = useState("");
-  const [saving, setSaving] = useState(false);
+  // Login form
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPass, setShowPass] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // OTP
+  const [otp, setOtp] = useState("");
+  const [otpSession, setOtpSession] = useState<OtpSessionData | null>(null);
 
   useEffect(() => {
     fetch("/api/elms-credentials")
@@ -59,66 +35,65 @@ export function ElmsSetup({ onConnected }: Props) {
       .catch(() => setConnected(false));
   }, []);
 
-  // 自動取得モード：トークン生成
-  const startAuto = useCallback(async () => {
-    setError(null);
-    const res = await fetch("/api/elms-relay");
-    const data = await res.json();
-    if (data.token) {
-      setToken(data.token);
-      setTokenExpiry(Date.now() + 14 * 60 * 1000); // 14分でUI警告
-      setMode("auto");
-      setPolling(true);
-    }
-  }, []);
-
-  // ポーリング：接続完了を検出
-  useEffect(() => {
-    if (!polling) return;
-    const id = setInterval(async () => {
-      if (Date.now() > tokenExpiry) {
-        setPolling(false);
-        setToken(null);
-        setError("トークンが期限切れです。もう一度やり直してください。");
-        setMode("status");
-        return;
-      }
-      const res = await fetch("/api/elms-credentials");
-      const data = await res.json();
-      if (data.connected) {
-        setPolling(false);
-        setConnected(true);
-        setMode("status");
-        onConnected?.();
-      }
-    }, 3000);
-    return () => clearInterval(id);
-  }, [polling, tokenExpiry, onConnected]);
-
-  const handleManualSave = async () => {
-    if (!samlCookie.trim() || !wapid.trim()) {
-      setError("両方の値を入力してください");
+  const handleLogin = async () => {
+    if (!username.trim() || !password) {
+      setError("IDとパスワードを入力してください");
       return;
     }
-    setSaving(true);
+    setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/elms-credentials", {
+      const res = await fetch("/api/elms-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ elms_cookie: samlCookie.trim(), elms_wapid: wapid.trim() }),
+        body: JSON.stringify({ action: "login", username: username.trim(), password }),
       });
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setConnected(true);
-      setMode("status");
-      setSamlCookie("");
-      setWapid("");
-      onConnected?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "保存に失敗しました");
+
+      if (data.status === "ok") {
+        setConnected(true);
+        setStep("status");
+        setUsername("");
+        setPassword("");
+        onConnected?.();
+        return;
+      }
+      if (data.status === "otp_required") {
+        setOtpSession(data.sessionData);
+        setStep("otp");
+        return;
+      }
+      setError(data.message ?? "認証に失敗しました");
+    } catch {
+      setError("通信エラーが発生しました");
     } finally {
-      setSaving(false);
+      setLoading(false);
+    }
+  };
+
+  const handleOtp = async () => {
+    if (!otp.trim()) { setError("ワンタイムパスワードを入力してください"); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/elms-auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "otp", otp: otp.trim(), sessionData: otpSession }),
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        setConnected(true);
+        setStep("status");
+        setOtp("");
+        onConnected?.();
+      } else {
+        setError(data.message ?? "OTP認証に失敗しました");
+      }
+    } catch {
+      setError("通信エラーが発生しました");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -128,19 +103,15 @@ export function ElmsSetup({ onConnected }: Props) {
     setConnected(false);
   };
 
-  const appUrl =
-    typeof window !== "undefined"
-      ? `${window.location.protocol}//${window.location.host}`
-      : "https://unirelite-app.vercel.app";
-
   if (connected === null) {
     return <div className="py-8 text-center text-sm text-gray-400">確認中…</div>;
   }
 
   // ── ステータス画面 ─────────────────────────────
-  if (mode === "status") {
+  if (step === "status") {
     return (
-      <div className="p-4 space-y-4">
+      <div className="p-4 space-y-4 pb-6">
+        {/* 接続状態 */}
         <div className={`flex items-center gap-3 p-3 rounded-xl ${connected ? "bg-green-50" : "bg-gray-50"}`}>
           {connected
             ? <Wifi className="w-5 h-5 text-green-600 shrink-0" />
@@ -156,20 +127,12 @@ export function ElmsSetup({ onConnected }: Props) {
           </div>
         </div>
 
-        {error && (
-          <div className="flex items-center gap-2 text-red-500 text-xs">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            {error}
-          </div>
-        )}
-
         <button
-          onClick={startAuto}
-          className="w-full py-3 rounded-xl bg-hokudai-green text-white text-sm font-medium flex items-center justify-center gap-2 active:opacity-80"
+          onClick={() => { setStep("login"); setError(null); }}
+          className="w-full py-3 rounded-xl bg-hokudai-green text-white text-sm font-semibold flex items-center justify-center gap-2 active:opacity-80"
         >
-          <Bookmark className="w-4 h-4" />
-          {connected ? "Cookieを更新する" : "ELMSを接続する"}
-          <ChevronRight className="w-4 h-4 ml-auto" />
+          <Wifi className="w-4 h-4" />
+          {connected ? "Cookieを再取得する" : "ELMSに接続する"}
         </button>
 
         {connected && (
@@ -185,148 +148,141 @@ export function ElmsSetup({ onConnected }: Props) {
     );
   }
 
-  // ── 自動取得画面 ──────────────────────────────
-  if (mode === "auto" && token) {
-    const bookmarkletHref = makeBookmarklet(token, appUrl);
+  // ── ログインフォーム ────────────────────────────
+  if (step === "login") {
     return (
       <div className="p-4 space-y-4 pb-8">
-        <div className="flex items-center gap-2 text-hokudai-green">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          <span className="text-sm font-semibold">接続待機中…</span>
-        </div>
-
-        {/* ステップ1 */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="w-6 h-6 rounded-full bg-hokudai-green text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
-            <p className="text-sm font-medium text-gray-700">Unireを開いてログインする</p>
-          </div>
-          <a
-            href="https://unire.hokudai.ac.jp/api/samlauth/login"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-8 flex items-center gap-2 py-2.5 px-4 rounded-xl bg-gray-100 text-sm text-gray-700 active:bg-gray-200"
-          >
-            <ExternalLink className="w-4 h-4 text-hokudai-green" />
-            Unireを開く（新しいタブ）
-          </a>
-        </div>
-
-        {/* ステップ2 */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="w-6 h-6 rounded-full bg-hokudai-green text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
-            <p className="text-sm font-medium text-gray-700">ブックマークを保存する</p>
-          </div>
-          <div className="ml-8 space-y-2">
-            <p className="text-xs text-gray-500">以下のボタンをブラウザのブックマークバーにドラッグ＆ドロップしてください</p>
-            {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-            <a
-              href={bookmarkletHref}
-              draggable
-              onClick={(e) => e.preventDefault()}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-hokudai-green/10 border-2 border-dashed border-hokudai-green text-hokudai-green text-sm font-medium cursor-grab active:cursor-grabbing select-none"
-            >
-              <Bookmark className="w-4 h-4" />
-              UnireLite ELMS接続
-            </a>
-            <p className="text-[10px] text-gray-400">
-              ブックマークバーが表示されていない場合：Ctrl+Shift+B（Mac: ⌘+Shift+B）
-            </p>
-          </div>
-        </div>
-
-        {/* ステップ3 */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="w-6 h-6 rounded-full bg-hokudai-green text-white text-xs font-bold flex items-center justify-center shrink-0">3</span>
-            <p className="text-sm font-medium text-gray-700">Unireのページでブックマークをクリック</p>
-          </div>
-          <p className="ml-8 text-xs text-gray-500">
-            Unireのトップページが表示されたら、保存したブックマークをクリックするだけで自動接続されます
+        {/* セキュリティ説明 */}
+        <div className="flex items-start gap-2 bg-blue-50 rounded-xl p-3">
+          <ShieldCheck className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+          <p className="text-xs text-blue-600">
+            入力した情報はサーバーに送信されません。認証のためだけに使用され、パスワードは即時破棄されます。
           </p>
         </div>
 
-        <hr className="border-gray-100" />
+        {/* 北大ID */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-600 mb-1">
+            北大統合認証ID
+          </label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="例: b_kobayashi"
+            autoCapitalize="none"
+            autoCorrect="off"
+            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-hokudai-green/40"
+          />
+        </div>
 
-        <div className="flex items-center justify-between">
+        {/* パスワード */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-600 mb-1">
+            パスワード
+          </label>
+          <div className="relative">
+            <input
+              type={showPass ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              placeholder="パスワードを入力"
+              className="w-full border border-gray-200 rounded-xl px-4 py-3 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-hokudai-green/40"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPass((v) => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 active:text-gray-600"
+            >
+              {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-2 text-red-500 text-xs">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {error}
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
           <button
-            onClick={() => { setPolling(false); setMode("status"); }}
-            className="text-sm text-gray-400 active:text-gray-600"
+            onClick={() => { setStep("status"); setError(null); setPassword(""); }}
+            className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium active:opacity-80"
           >
             キャンセル
           </button>
           <button
-            onClick={() => { setMode("manual"); setPolling(false); }}
-            className="text-xs text-gray-400 underline active:text-gray-600"
+            onClick={handleLogin}
+            disabled={loading}
+            className="flex-1 py-3 rounded-xl bg-hokudai-green text-white text-sm font-semibold flex items-center justify-center gap-2 active:opacity-80 disabled:opacity-50"
           >
-            手動で入力する
+            {loading ? (
+              <><Loader2 className="w-4 h-4 animate-spin" />認証中…</>
+            ) : (
+              <><Lock className="w-4 h-4" />接続する</>
+            )}
           </button>
         </div>
+
+        <p className="text-[10px] text-center text-gray-400">
+          北大の統合認証システム（IDプロバイダ）に直接ログインします
+        </p>
       </div>
     );
   }
 
-  // ── 手動入力画面 ──────────────────────────────
+  // ── OTP入力画面 ────────────────────────────────
   return (
     <div className="p-4 space-y-4 pb-8">
-      <div className="bg-blue-50 rounded-xl p-3 space-y-2">
-        <p className="text-xs font-semibold text-blue-700">Cookieの手動取得方法</p>
-        <ol className="text-xs text-blue-600 space-y-1 list-decimal list-inside">
-          <li>PCブラウザで <span className="font-mono bg-blue-100 px-1 rounded">unire.hokudai.ac.jp</span> にログイン</li>
-          <li>DevTools（F12）→「Application」→「Cookies」→ サイトを選択</li>
-          <li><span className="font-mono bg-blue-100 px-1 rounded">.AspNetCore.saml2</span> の値をコピー</li>
-          <li><span className="font-mono bg-blue-100 px-1 rounded">WAPID</span> の値をコピー</li>
-        </ol>
+      <div className="bg-amber-50 rounded-xl p-3">
+        <p className="text-xs font-semibold text-amber-700 mb-1">ワンタイムパスワードが必要です</p>
+        <p className="text-xs text-amber-600">
+          メールまたは認証アプリに届いたワンタイムパスワードを入力してください
+        </p>
       </div>
 
-      <div className="space-y-3">
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1">.AspNetCore.saml2</label>
-          <textarea
-            value={samlCookie}
-            onChange={(e) => setSamlCookie(e.target.value)}
-            placeholder="CfDJ8Ad0..."
-            rows={3}
-            className="w-full text-xs font-mono border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-hokudai-green/40 resize-none"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1">WAPID</label>
-          <input
-            type="text"
-            value={wapid}
-            onChange={(e) => setWapid(e.target.value)}
-            placeholder="r8r0D160..."
-            className="w-full text-xs font-mono border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-hokudai-green/40"
-          />
-        </div>
+      <div>
+        <label className="block text-xs font-semibold text-gray-600 mb-1">
+          ワンタイムパスワード（OTP）
+        </label>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={otp}
+          onChange={(e) => setOtp(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleOtp()}
+          placeholder="6桁のコードを入力"
+          className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm text-center tracking-widest focus:outline-none focus:ring-2 focus:ring-hokudai-green/40"
+        />
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 text-red-500 text-xs">
-          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+        <div className="flex items-start gap-2 text-red-500 text-xs">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           {error}
         </div>
       )}
 
       <div className="flex gap-2">
         <button
-          onClick={() => { setMode("status"); setError(null); }}
-          className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium active:opacity-80"
+          onClick={() => { setStep("login"); setError(null); setOtp(""); }}
+          className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium active:opacity-80"
         >
-          キャンセル
+          戻る
         </button>
         <button
-          onClick={handleManualSave}
-          disabled={saving}
-          className="flex-1 py-2.5 rounded-xl bg-hokudai-green text-white text-sm font-medium flex items-center justify-center gap-2 active:opacity-80 disabled:opacity-50"
+          onClick={handleOtp}
+          disabled={loading}
+          className="flex-1 py-3 rounded-xl bg-hokudai-green text-white text-sm font-semibold flex items-center justify-center gap-2 active:opacity-80 disabled:opacity-50"
         >
-          {saving
-            ? <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-            : <CheckCircle className="w-4 h-4" />
-          }
-          保存する
+          {loading ? (
+            <><Loader2 className="w-4 h-4 animate-spin" />確認中…</>
+          ) : (
+            <><CheckCircle className="w-4 h-4" />確認する</>
+          )}
         </button>
       </div>
     </div>
