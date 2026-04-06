@@ -237,10 +237,13 @@ export function ElmsSetup({ onConnected }: Props) {
   // ── OTP入力画面 ────────────────────────────────
   return (
     <div className="p-4 space-y-4 pb-8">
-      <div className="bg-amber-50 rounded-xl p-3">
-        <p className="text-xs font-semibold text-amber-700 mb-1">ワンタイムパスワードが必要です</p>
+      <div className="bg-amber-50 rounded-xl p-3 space-y-1">
+        <p className="text-xs font-semibold text-amber-700">ワンタイムパスワードが必要です</p>
         <p className="text-xs text-amber-600">
-          メールまたは認証アプリに届いたワンタイムパスワードを入力してください
+          {otpSession?.hint ?? "北大メール（@eis.hokudai.ac.jp）をご確認ください"}
+        </p>
+        <p className="text-[10px] text-amber-500">
+          届いていない場合：迷惑メールフォルダも確認してください
         </p>
       </div>
 

@@ -124,6 +124,7 @@ export interface OtpSessionData {
   sessid: string;
   back: string;
   jar: CookieJar;
+  hint?: string; // OTPの送信先ヒント
 }
 
 /**
@@ -216,13 +217,15 @@ export async function elmsLogin(
       const otpUrl = new URL(step2Post.headers.get("location")!, loginCgiAction).toString();
       const otpPage = await followRedirects(otpUrl, jar);
       jar = otpPage.jar;
+      const hint = extractOtpHint(otpPage.body);
       return {
         status: "otp_required",
         sessionData: {
-          preloginUrl: loginCgiAction,
+          preloginUrl: new URL(otpPage.url.includes("otp") ? otpPage.url : loginCgiAction, loginCgiAction).toString(),
           sessid: extractInput(otpPage.body, "sessid") || sessid2,
           back: extractInput(otpPage.body, "back") || back2,
           jar,
+          hint,
         },
       };
     }
@@ -275,6 +278,17 @@ export async function elmsSubmitOtp(
   } catch (e) {
     return { status: "error", message: e instanceof Error ? e.message : "不明なエラー" };
   }
+}
+
+/** Extract OTP delivery hint from OTP page HTML */
+function extractOtpHint(html: string): string {
+  // Look for masked email addresses like ***@eis.hokudai.ac.jp
+  const emailMatch = html.match(/[*\w.]+@[\w.]+\.[a-z]{2,}/i);
+  if (emailMatch) return `送信先: ${emailMatch[0]}`;
+  // Look for Japanese descriptions
+  const descMatch = html.match(/(?:メール|mail|送信|届)[^<]{0,60}/i);
+  if (descMatch) return descMatch[0].trim();
+  return "北大メール（@eis.hokudai.ac.jp）をご確認ください";
 }
 
 /** After IdP auth: follow SAMLResponse → Unire ACS → extract cookies */
